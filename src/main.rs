@@ -556,7 +556,10 @@ fn App() -> impl IntoView {
     };
 
     // Does the output fit the size limit? Shown under the File size controls.
-    let fit_status = move || out_info.get().map(|o| {
+    // Always one line: a placeholder until the first result, so the panel never resizes.
+    let fit_status = move || out_info.get().map_or_else(|| view! {
+        <div class="status pending">"Checking size…"</div>
+    }.into_any(), |o| {
         let target = (target_kb.get() * 1000.0) as usize;
         let (cls, msg) = if o.fits {
             ("ok", format!("✓ {} — under {}", fmt_bytes(o.bytes), fmt_bytes(target)))
@@ -565,7 +568,7 @@ fn App() -> impl IntoView {
         } else {
             ("bad", format!("✗ {} — over {}", fmt_bytes(o.bytes), fmt_bytes(target)))
         };
-        view! { <div class=format!("status {cls}")>{msg}</div> }
+        view! { <div class=format!("status {cls}")>{msg}</div> }.into_any()
     });
 
     let download_button = move || view! {
@@ -657,10 +660,8 @@ fn App() -> impl IntoView {
                         </div>
                     </div>
                 </div>
-                // Top left: open.
-                <div class="panel brand">
-                    {open_button()}
-                </div>
+                // Top left: a free-floating Open button.
+                <div class="open">{open_button()}</div>
                 // Bottom centre: what went in, what came out.
                 {summary_view()}
 
@@ -686,6 +687,13 @@ fn App() -> impl IntoView {
                             style:top=move || format!("{}%", view_rect.get().1 * 100.0)
                             style:width=move || format!("{}%", view_rect.get().2 * 100.0)
                             style:height=move || format!("{}%", view_rect.get().3 * 100.0)
+                            style:border-radius=move || {
+                                // The panel's top corners are rounded (13px inside its 1px
+                                // border); the minimap's bottom edge meets the slider, square.
+                                let (l, t, w, _) = view_rect.get();
+                                let at = |touch: bool| if touch { "13px" } else { "2px" };
+                                format!("{} {} 2px 2px", at(l < 0.002 && t < 0.002), at(l + w > 0.998 && t < 0.002))
+                            }
                         ></div>
                     </div>
                     <div class="zoomslider" on:wheel=move |ev| wheel_zoom(&ev, false)>
@@ -701,7 +709,14 @@ fn App() -> impl IntoView {
                     <button class="tab"
                         title=move || if collapsed.get() { "Show controls" } else { "Hide controls" }
                         on:click=move |_| collapsed.update(|c| *c = !*c)
-                    >{move || if collapsed.get() { "›" } else { "‹" }}</button>
+                    >
+                        <svg viewBox="0 0 10 16" width="8" height="13" aria-hidden="true"
+                            style:transform=move || if collapsed.get() { "scaleX(-1)" } else { "none" }
+                        >
+                            <polyline points="7.5,2 2.5,8 7.5,14" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
                     <div class="panel-body">
                         <section>
                             <h2>"Resolution"</h2>
