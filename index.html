@@ -25,9 +25,14 @@
       content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'"
     />
     <title>PNG → JPEG Resizer</title>
-    <!-- The page, and the Web Worker that does all image processing off the page's thread. -->
-    <link data-trunk rel="rust" data-bin="resize-img" data-type="main" data-wasm-opt="3" />
-    <link data-trunk rel="rust" data-bin="worker" data-type="worker" data-wasm-opt="3" />
+    <!-- The page, and the Web Worker that does all image processing off the page's thread.
+         wasm-opt is told the WebAssembly features in use, matching what rustc records
+         (the worker also uses SIMD). It can't read them from the file: `strip = true`
+         drops rustc's feature list, and without it wasm-opt rejects bulk-memory etc. -->
+    <link data-trunk rel="rust" data-bin="resize-img" data-type="main" data-wasm-opt="3"
+          data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-call-indirect-overlong --enable-multivalue --enable-mutable-globals --enable-nontrapping-float-to-int --enable-reference-types --enable-sign-ext" />
+    <link data-trunk rel="rust" data-bin="worker" data-type="worker" data-wasm-opt="3"
+          data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-call-indirect-overlong --enable-multivalue --enable-mutable-globals --enable-nontrapping-float-to-int --enable-reference-types --enable-sign-ext --enable-simd" />
     <style>
       :root {
         --bg: #f4f4f5; --panel: #ffffff; --text: #18181b; --muted: #71717a;
