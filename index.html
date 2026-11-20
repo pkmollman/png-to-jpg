@@ -99,20 +99,18 @@
       .panel * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--text) 25%, transparent) transparent; }
 
       /* Top left: name, open, dock switch. */
-      .brand { top: var(--edge); left: var(--edge); display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; }
-      .brand h1 { margin-right: 4px; }
+      .brand { top: var(--edge); left: var(--edge); display: flex; align-items: center; gap: 8px; padding: 6px; }
 
       /* Top centre: one-line in/out summary. */
-      .summary { top: var(--edge); left: 50%; transform: translateX(-50%); max-width: calc(100vw - 600px);
+      /* Bottom centre, clear of the controls panel (left) and Download (right). */
+      .summary { bottom: var(--edge); left: 50%; transform: translateX(-50%); max-width: calc(100vw - 2 * 372px);
         display: flex; align-items: center; gap: 16px; padding: 8px 14px; white-space: nowrap; overflow: hidden;
         font-variant-numeric: tabular-nums; }
       /* Only the file name gives way; output figures never shrink. Timing hides first when space runs out. */
       .summary .item { display: flex; flex: none; }
       .summary .item.input { flex: 0 1 auto; min-width: 90px; }
-      @media (max-width: 1400px) { .summary .timing { display: none; } }
       .summary .k { color: var(--muted); margin-right: 6px; }
       .summary .name { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
-      .summary .timing { color: var(--muted); }
       .busy { color: var(--muted); display: none; }
       .busy.on { display: inline; }
 
@@ -124,7 +122,7 @@
       .controls .panel-body { overflow-y: auto; padding: 0 16px; }
       .controls .panel-body section { padding: 14px 0; }
       .controls .panel-body section + section { border-top: 1px solid var(--border); }
-      .tab { position: absolute; left: 100%; top: 14px; margin-left: 6px;
+      .tab { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 6px;
         width: 26px; height: 44px; padding: 0; border-radius: 8px;
         font-size: 18px; line-height: 1; color: var(--muted);
         background: color-mix(in srgb, var(--panel) 45%, transparent) !important;
@@ -188,13 +186,18 @@
       .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
       .button.disabled { pointer-events: none; opacity: .5; }
 
+      @media (min-width: 761px) and (max-width: 1150px) {
+        .summary { left: auto; right: var(--edge); transform: none; bottom: calc(var(--edge) + 52px);
+          max-width: calc(100vw - 2 * var(--edge) - 360px); }
+      }
+
       @media (max-width: 760px) {
-        /* Name/open and zoom share the top row; the summary wraps below them. */
-        .brand h1 { display: none; }
-        .brand { padding-left: 6px; }
-        .summary { top: 64px; left: var(--edge); right: calc(var(--edge) + 148px); transform: none; max-width: none; flex-wrap: wrap;
+        /* Phone: Open and the minimap share the top row; the summary sits below them. */
+        .summary { top: 64px; bottom: auto; left: var(--edge); right: calc(var(--edge) + 148px); transform: none; max-width: none; flex-wrap: wrap;
           gap: 2px 12px; white-space: normal; }
-        .summary .timing { display: none; }
+        .summary .item, .summary .item.input { flex: 1 1 100%; min-width: 0; }
+        .summary .name { max-width: none; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+        .summary .item .k { flex: none; }
         .controls { width: calc(100vw - 2 * var(--edge) - 40px); max-height: 50vh; bottom: 72px; }
         .navigator { width: 140px; }
       }

@@ -34,9 +34,6 @@ struct OutInfo {
     quality: u16,
     fits: bool,
     auto: bool,
-    prep_ms: Option<f64>,
-    encode_ms: f64,
-    passes: u32,
 }
 
 /// Everything that affects the output; a change sends a new job to the worker.
@@ -94,12 +91,18 @@ fn revoke(url: Option<String>) {
     }
 }
 
-/// Read the first entry of a JS `FileList`: (name, bytes, the File as a Blob).
-async fn read_first_file(files: JsValue) -> Result<(String, js_sys::Uint8Array, web_sys::Blob), String> {
-    let file = js_sys::Reflect::get(&files, &JsValue::from(0)).map_err(|_| "no file")?;
-    if file.is_undefined() || file.is_null() {
-        return Err("No file selected".into());
-    }
+/// Take the first `File` out of a JS `FileList`. Must be called synchronously in
+/// the change/drop handler: the list can be emptied right after (iOS Safari
+/// empties it when the input is cleared; browsers empty a drop's list once the
+/// drop event ends), but the `File` itself stays readable.
+fn first_file(files: &JsValue) -> Option<JsValue> {
+    js_sys::Reflect::get(files, &JsValue::from(0))
+        .ok()
+        .filter(|f| !f.is_undefined() && !f.is_null())
+}
+
+/// Read a `File`: (name, bytes, the File as a Blob).
+async fn read_file(file: JsValue) -> Result<(String, js_sys::Uint8Array, web_sys::Blob), String> {
     let name = js_sys::Reflect::get(&file, &"name".into())
         .ok()
         .and_then(|v| v.as_string())
@@ -125,8 +128,10 @@ fn App() -> impl IntoView {
     let height = RwSignal::new(1080u32);
     let auto = RwSignal::new(true);
     let target_kb = RwSignal::new(500.0f64);
-    let quality = RwSignal::new(85u16);
-    let max_quality = RwSignal::new(92u16);
+    // Manual quality; in auto mode, the quality the search last chose.
+    let quality = RwSignal::new(100u16);
+    // Auto mode's ceiling. 100 = no ceiling: an image that fits comes out at full quality.
+    let max_quality = RwSignal::new(100u16);
 
     let split = RwSignal::new(50.0f64);
     // Screen pixels per original pixel; 0 = fit the window.
@@ -195,7 +200,7 @@ fn App() -> impl IntoView {
             version.set(v);
             busy.set(in_flight.get_value());
         }
-        FromWorker::Encoded { id, width: w, height: h, jpeg, quality: q, fits, prep_ms, encode_ms, passes } => {
+        FromWorker::Encoded { id, width: w, height: h, jpeg, quality: q, fits, .. } => {
             // Only show the newest request's result; older ones finished late.
             if id == last_job_id.get_value() {
                 revoke(out_url.get_untracked());
@@ -211,9 +216,6 @@ fn App() -> impl IntoView {
                     quality: q,
                     fits,
                     auto: was_auto,
-                    prep_ms,
-                    encode_ms,
-                    passes,
                 }));
             }
             job_finished();
@@ -247,8 +249,11 @@ fn App() -> impl IntoView {
     }
 
     let load = move |files: JsValue| {
+        // Grab the File now, before the list can be emptied (see `first_file`).
+        // Nothing picked (e.g. the picker was closed): nothing to do.
+        let Some(picked) = first_file(&files) else { return };
         spawn_local(async move {
-            let (name, file, blob) = match read_first_file(files).await {
+            let (name, file, blob) = match read_file(picked).await {
                 Ok(r) => r,
                 Err(e) => return error.set(Some(e)),
             };
@@ -528,7 +533,7 @@ fn App() -> impl IntoView {
         </label>
     };
 
-    // One-line file summary for the top-centre bar. Placeholders keep its size
+    // One-line file summary for the bottom-centre bar. Placeholders keep its size
     // steady while the first result is computed.
     let summary_view = move || view! {
         <div class="panel summary">
@@ -544,14 +549,6 @@ fn App() -> impl IntoView {
                 {move || out_info.get().map_or_else(
                     || "—".to_string(),
                     |o| format!("{}×{} · {} · quality {}", o.width, o.height, fmt_bytes(o.bytes), o.quality),
-                )}
-            </span>
-            <span class="item timing">
-                {move || out_info.get().map_or_else(
-                    || "—".to_string(),
-                    |o| format!("resize {} · encode {:.0} ms ({} {})",
-                        o.prep_ms.map(|m| format!("{m:.0} ms")).unwrap_or_else(|| "cached".into()),
-                        o.encode_ms, o.passes, if o.passes == 1 { "pass" } else { "passes" }),
                 )}
             </span>
             <span class="busy" class:on=move || busy.get()>"Processing…"</span>
@@ -660,12 +657,11 @@ fn App() -> impl IntoView {
                         </div>
                     </div>
                 </div>
-                // Top left: app name and open.
+                // Top left: open.
                 <div class="panel brand">
-                    <h1>"Resizer"</h1>
                     {open_button()}
                 </div>
-                // Top centre: what went in, what came out.
+                // Bottom centre: what went in, what came out.
                 {summary_view()}
 
                 // Top right, one glass panel: minimap (always shown) with the zoom slider under it.
