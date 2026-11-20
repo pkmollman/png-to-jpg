@@ -8,7 +8,7 @@ fast_image_resize = { version = "6.1.0", features = ["image"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 js-sys = "0.3.107"
 leptos = { version = "0.8.23", features = ["csr"] }
-web-sys = { version = "0.3.107", features = ["Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope", "MessageEvent", "ErrorEvent"] }
+web-sys = { version = "0.3.107", features = ["Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope", "MessageEvent", "ErrorEvent", "BlobPropertyBag"] }
 
 # Image processing is unusably slow unoptimized; optimize deps even in dev builds.
 [profile.dev.package."*"]

@@ -6,9 +6,10 @@ use leptos::task::spawn_local;
 use leptos::wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use resize_img::protocol::{FromWorker, JobSpec, ToWorker};
 
-/// The processing worker's loader script, emitted by Trunk next to the page.
-/// Relative, so it also works when the site is served from a subpath.
-const WORKER_URL: &str = "./worker_loader.js";
+/// The worker's JS glue and wasm, emitted by Trunk next to the page. Relative,
+/// so they also resolve when the site is served from a subpath.
+const WORKER_JS: &str = "./worker.js";
+const WORKER_WASM: &str = "./worker_bg.wasm";
 /// Resolution buttons: 100%, 50%, 25%, 12.5%, 6.25%.
 const HALVING_STEPS: u32 = 5;
 /// A halving step is offered only while the short side stays at least this big.
@@ -60,6 +61,25 @@ fn fmt_bytes(n: usize) -> String {
     } else {
         format!("{:.1} KB", n as f64 / 1000.0)
     }
+}
+
+/// Start the processing worker from a `blob:` URL holding a two-line loader.
+///
+/// Security: the page's CSP comes from a `<meta>` tag, and a worker loaded from
+/// its own file would ignore it (it takes its policy from that file's HTTP
+/// headers, which GitHub Pages can't set). A worker started from a `blob:` URL
+/// inherits the page's policy instead, so `connect-src 'self'` etc. also bind
+/// everything that runs inside the worker.
+fn start_worker() -> Result<web_sys::Worker, JsValue> {
+    let base = web_sys::window().ok_or("no window")?.location().href()?;
+    let abs = |rel: &str| web_sys::Url::new_with_base(rel, &base).map(|u| u.href());
+    // `{:?}` gives a double-quoted, escaped string literal, valid in JS too.
+    let loader = format!("importScripts({:?});wasm_bindgen({:?});", abs(WORKER_JS)?, abs(WORKER_WASM)?);
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("text/javascript");
+    let blob = web_sys::Blob::new_with_str_sequence_and_options(&js_sys::Array::of1(&loader.into()), &opts)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    web_sys::Worker::new(&url)
 }
 
 /// Blob URL for bytes that already live in JS memory (no copy through wasm).
@@ -205,7 +225,7 @@ fn App() -> impl IntoView {
         }
     };
 
-    match web_sys::Worker::new(WORKER_URL) {
+    match start_worker() {
         Ok(w) => {
             let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |ev: web_sys::MessageEvent| {
                 if let Some(msg) = FromWorker::parse(&ev.data()) {
