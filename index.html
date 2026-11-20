@@ -1,5 +1,196 @@
 <!DOCTYPE html>
-<html>
-  <head></head>
-  <body>E</body>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Images never leave the machine: the browser refuses any request to another
+      origin, including from dependencies. Everything not listed is blocked by
+      default-src 'none'.
+      - connect-src 'self': the .wasm fetch, plus (in CSP3 browsers) trunk serve's
+        same-origin live-reload WebSocket. Nothing else can be fetched or beaconed.
+      - img-src 'self' blob:: previews are local blob: URLs.
+      - worker-src 'self': the image-processing worker, served next to the page.
+      - script-src: Trunk injects an inline loader whose content changes every
+        build, so it needs 'unsafe-inline'; 'wasm-unsafe-eval' lets WebAssembly
+        compile. This only weakens protection against injected scripts, which
+        could still not send data anywhere.
+      - CSP cannot stop top-level navigation (window.location = ...).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>PNG → JPEG Resizer</title>
+    <!-- The page, and the Web Worker that does all image processing off the page's thread. -->
+    <link data-trunk rel="rust" data-bin="resize-img" data-type="main" data-wasm-opt="3" />
+    <link data-trunk rel="rust" data-bin="worker" data-type="worker" data-loader-shim data-wasm-opt="3" />
+    <style>
+      :root {
+        --bg: #f4f4f5; --panel: #ffffff; --text: #18181b; --muted: #71717a;
+        --border: #e4e4e7; --accent: #2563eb; --ok: #15803d; --bad: #b91c1c;
+        --check-a: #e4e4e7; --check-b: #fafafa;
+        --edge: 16px; /* distance of every floating panel/button from the window edge */
+        /* What shows through the glass is pushed toward the panel colour so text stays readable. */
+        --glass: blur(22px) saturate(160%) brightness(1.25);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111113; --panel: #1c1c1f; --text: #ececee; --muted: #9b9ba3;
+          --border: #2e2e33; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171;
+          --check-a: #2a2a2e; --check-b: #222225;
+          --glass: blur(22px) saturate(160%) brightness(.6);
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text);
+        font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .app { min-height: 100vh; }
+      h1 { font-size: 15px; margin: 0; }
+      h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+        color: var(--muted); margin: 0 0 10px; }
+      .hint { color: var(--muted); }
+      small.hint { display: block; }
+
+      /* Empty state: the whole window is the drop target. */
+      .empty { position: fixed; inset: 20px; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 10px; text-align: center; font-size: 16px;
+        border: 2px dashed var(--border); border-radius: 14px; }
+      .empty h1 { font-size: 20px; }
+      .empty p { margin: 0; }
+
+      /* Full-page preview. Fit = whole window; zoom levels scroll. */
+      .stage { position: fixed; inset: 0; overflow: auto; display: flex; background: var(--bg); }
+      /* No scrollbars: pan by dragging the image or with the minimap. */
+      .stage { scrollbar-width: none; }
+      .stage::-webkit-scrollbar { display: none; }
+      .compare { position: relative; margin: auto; flex: none; cursor: ew-resize; user-select: none; touch-action: none;
+        background: repeating-conic-gradient(var(--check-a) 0 25%, var(--check-b) 0 50%) 0 0 / 16px 16px; }
+      .compare > * { pointer-events: none; }
+      .compare img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      .divider { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+        background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+      .knob { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 32px; height: 32px; border-radius: 50%; background: #fff; color: #111;
+        display: grid; place-content: center; box-shadow: 0 1px 4px rgba(0,0,0,.4); font-size: 16px; }
+
+      /* Floating panels. */
+      /* Frosted glass: mostly transparent tint, heavy blur, a faint rim and top highlight. */
+      .panel { position: fixed; z-index: 1; border-radius: 14px;
+        background: color-mix(in srgb, var(--panel) 45%, transparent);
+        backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
+        border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+        box-shadow: 0 10px 40px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.10); }
+      .panel input[type=number], .panel select, .panel button, .panel .button:not(.primary) {
+        background: color-mix(in srgb, var(--bg) 30%, transparent);
+        border-color: color-mix(in srgb, var(--text) 16%, transparent); }
+      .panel button.active { background: var(--accent); border-color: var(--accent); }
+      .panel-body section + section, .panel-head {
+        border-color: color-mix(in srgb, var(--text) 12%, transparent) !important; }
+      button.icon { padding: 4px 9px; font-size: 15px; line-height: 1; }
+      .panel * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--text) 25%, transparent) transparent; }
+
+      /* Top left: name, open, dock switch. */
+      .brand { top: var(--edge); left: var(--edge); display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; }
+      .brand h1 { margin-right: 4px; }
+
+      /* Top centre: one-line in/out summary. */
+      .summary { top: var(--edge); left: 50%; transform: translateX(-50%); max-width: calc(100vw - 600px);
+        display: flex; align-items: center; gap: 16px; padding: 8px 14px; white-space: nowrap; overflow: hidden;
+        font-variant-numeric: tabular-nums; }
+      /* Only the file name gives way; output figures never shrink. Timing hides first when space runs out. */
+      .summary .item { display: flex; flex: none; }
+      .summary .item.input { flex: 0 1 auto; min-width: 90px; }
+      @media (max-width: 1400px) { .summary .timing { display: none; } }
+      .summary .k { color: var(--muted); margin-right: 6px; }
+      .summary .name { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+      .summary .timing { color: var(--muted); }
+      .busy { color: var(--muted); display: none; }
+      .busy.on { display: inline; }
+
+      /* Controls: compact, bottom left, sections stacked. The tab on its right edge
+         slides it out to the left, leaving only the tab visible. */
+      .controls { left: var(--edge); bottom: var(--edge); width: 300px; max-height: calc(100vh - 100px);
+        display: flex; flex-direction: column; transition: transform .25s ease; }
+      .controls.collapsed { transform: translateX(calc(-100% - var(--edge))); }
+      .controls .panel-body { overflow-y: auto; padding: 0 16px; }
+      .controls .panel-body section { padding: 14px 0; }
+      .controls .panel-body section + section { border-top: 1px solid var(--border); }
+      .tab { position: absolute; left: 100%; top: 14px; margin-left: 6px;
+        width: 26px; height: 44px; padding: 0; border-radius: 8px;
+        font-size: 18px; line-height: 1; color: var(--muted);
+        background: color-mix(in srgb, var(--panel) 45%, transparent) !important;
+        backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
+        box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+      .tab:hover { color: var(--text); }
+
+      /* Download: on its own, bottom right. */
+      .download { position: fixed; z-index: 1; right: var(--edge); bottom: var(--edge); display: flex; }
+      /* Block-level so its padding counts toward the inset (an inline link's padding spilled 9px past it). */
+      .download .button { display: block; padding: 9px 16px; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+
+      /* Minimap: whole image with the visible region outlined; click/drag to pan. */
+      .navigator { top: var(--edge); right: var(--edge); width: 200px; overflow: hidden;
+        display: flex; flex-direction: column; }
+      .minimap { position: relative; width: 100%; cursor: crosshair; touch-action: none; user-select: none;
+        border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent); }
+      .minimap > * { pointer-events: none; }
+      .minimap img { display: block; width: 100%; height: 100%; opacity: .85; }
+      .zoomslider { padding: 8px 10px; display: flex; }
+      .zoomslider input { width: 100%; margin: 0; accent-color: var(--accent); }
+      .viewbox { position: absolute; border: 2px solid #4ade80; border-radius: 2px;
+        box-shadow: 0 0 0 9999px rgba(0,0,0,.35); }
+
+      .status { margin-top: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .status.ok { color: var(--ok); }
+      .status.bad { color: var(--bad); }
+
+      .error { position: fixed; z-index: 2; top: var(--edge); left: 50%; transform: translateX(-50%);
+        max-width: calc(100vw - 32px); padding: 8px 14px; border-radius: 8px; cursor: pointer;
+        background: var(--panel); color: var(--bad); border: 1px solid var(--bad);
+        box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+
+      /* Controls. */
+      .row { display: flex; align-items: center; gap: 8px; }
+      .row label { flex: 1; display: flex; align-items: center; gap: 6px; color: var(--muted); }
+      .x { color: var(--muted); }
+      .presets { margin: 10px 0; }
+      .presets { gap: 4px; }
+      .presets button { flex: 1; padding: 4px 2px; display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+      .presets button small { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .presets button.active small { color: inherit; opacity: .85; }
+      .presets button:disabled { opacity: .35; cursor: default; }
+      .presets button:disabled:hover { border-color: color-mix(in srgb, var(--text) 16%, transparent); }
+      input[type=number], select { width: 100%; padding: 6px 8px; border-radius: 6px;
+        border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+      .field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; color: var(--muted); }
+      .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+      .slider { display: block; margin-top: 12px; }
+      .slider.disabled { opacity: .55; }
+      .slider-head { display: flex; justify-content: space-between; }
+      .slider .val { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+      .slider input { width: 100%; accent-color: var(--accent); }
+      .slider small { color: var(--muted); display: block; }
+
+      button, .button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+        background: var(--panel); color: var(--text); font: inherit; cursor: pointer; text-decoration: none;
+        white-space: nowrap; }
+      button:hover, .button:hover { border-color: var(--accent); }
+      button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .button.disabled { pointer-events: none; opacity: .5; }
+
+      @media (max-width: 760px) {
+        /* Name/open and zoom share the top row; the summary wraps below them. */
+        .brand h1 { display: none; }
+        .brand { padding-left: 6px; }
+        .summary { top: 64px; left: var(--edge); right: calc(var(--edge) + 148px); transform: none; max-width: none; flex-wrap: wrap;
+          gap: 2px 12px; white-space: normal; }
+        .summary .timing { display: none; }
+        .controls { width: calc(100vw - 2 * var(--edge) - 40px); max-height: 50vh; bottom: 72px; }
+        .navigator { width: 140px; }
+      }
+    </style>
+  </head>
+  <body></body>
 </html>

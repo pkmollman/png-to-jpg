@@ -4,5 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fast_image_resize = { version = "6.1.0", features = ["image"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+js-sys = "0.3.107"
 leptos = { version = "0.8.23", features = ["csr"] }
+web-sys = { version = "0.3.107", features = ["Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope", "MessageEvent", "ErrorEvent"] }
+
+# Image processing is unusably slow unoptimized; optimize deps even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+# Small, fast release builds for the browser.
+[profile.release]
+# Measured on a 3840x2160 image: "s" is 51 KiB smaller (gzipped) than 3 for
+# ~12% slower JPEG encoding; "z" saves only 10 KiB more but resizes ~3x slower.
+opt-level = "s"
+lto = true          # whole-program optimisation across crates
+codegen-units = 1   # better optimisation, slower compile
+panic = "abort"     # no unwinding machinery (wasm aborts on panic anyway)
+strip = true        # drop debug names (over half of the .wasm otherwise)
