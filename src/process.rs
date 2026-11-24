@@ -1,7 +1,59 @@
-//! Pure image processing: flatten alpha, resize (bilinear), and JPEG-encode to a size budget.
+//! Pure image processing: flatten alpha, resize, sharpen, and JPEG-encode to a size budget.
 
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
-use image::{DynamicImage, ExtendedColorType, RgbImage, codecs::jpeg::JpegEncoder};
+use image::{DynamicImage, ExtendedColorType, RgbImage, codecs::jpeg::JpegEncoder, imageops};
+
+/// Resampling filter used when changing resolution.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Filter {
+    #[default]
+    Bilinear,
+    CatmullRom,
+    Lanczos3,
+    Nearest,
+}
+
+impl Filter {
+    /// (filter, stable key, label) in the order shown in the UI.
+    pub const ALL: [(Filter, &'static str, &'static str); 4] = [
+        (Filter::Bilinear, "bilinear", "Bilinear (smooth)"),
+        (Filter::CatmullRom, "catmullrom", "Catmull-Rom (bicubic)"),
+        (Filter::Lanczos3, "lanczos3", "Lanczos3 (sharpest)"),
+        (Filter::Nearest, "nearest", "Nearest (pixel art)"),
+    ];
+
+    pub fn key(self) -> &'static str {
+        Self::ALL.iter().find(|(f, ..)| *f == self).map_or("bilinear", |(_, k, _)| k)
+    }
+
+    pub fn from_key(key: &str) -> Filter {
+        Self::ALL.iter().find(|(_, k, _)| *k == key).map_or(Filter::default(), |(f, ..)| *f)
+    }
+
+    fn resize_alg(self) -> ResizeAlg {
+        match self {
+            Filter::Bilinear => ResizeAlg::Convolution(FilterType::Bilinear),
+            Filter::CatmullRom => ResizeAlg::Convolution(FilterType::CatmullRom),
+            Filter::Lanczos3 => ResizeAlg::Convolution(FilterType::Lanczos3),
+            Filter::Nearest => ResizeAlg::Nearest,
+        }
+    }
+}
+
+/// Unsharp-mask settings. `amount` 0 = off.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Sharpen {
+    /// How strongly edges are boosted (1.0 = add the full detail difference once).
+    pub amount: f32,
+    /// Blur radius (sigma, px) that defines what counts as detail.
+    pub radius: f32,
+    /// Ignore differences up to this size (0-255), so flat areas and noise stay put.
+    pub threshold: u8,
+}
+
+impl Sharpen {
+    pub const OFF: Sharpen = Sharpen { amount: 0.0, radius: 1.0, threshold: 2 };
+}
 
 /// Composite the image over a solid background (JPEG has no alpha channel).
 pub fn flatten(src: &DynamicImage, bg: [u8; 3]) -> RgbImage {
@@ -17,23 +69,45 @@ pub fn flatten(src: &DynamicImage, bg: [u8; 3]) -> RgbImage {
     out
 }
 
-/// Output resolution.
+/// Everything that shapes the image before encoding.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PrepParams {
     pub width: u32,
     pub height: u32,
+    pub filter: Filter,
+    pub sharpen: Sharpen,
 }
 
-/// Bilinear resize to the output resolution.
+/// Resize to the output resolution with the chosen filter, then sharpen.
 pub fn prepare(flat: &RgbImage, p: &PrepParams) -> RgbImage {
-    if flat.dimensions() == (p.width, p.height) {
-        return flat.clone();
+    let resized = if flat.dimensions() == (p.width, p.height) {
+        flat.clone()
+    } else {
+        let mut dst = RgbImage::new(p.width, p.height);
+        Resizer::new()
+            .resize(flat, &mut dst, &ResizeOptions::new().resize_alg(p.filter.resize_alg()))
+            .expect("RGB8 source and destination are always compatible");
+        dst
+    };
+    unsharp_mask(resized, &p.sharpen)
+}
+
+/// Classic unsharp mask: boost each pixel by `amount` times its difference from a
+/// blurred copy, skipping differences within `threshold`. (The `image` crate's
+/// `unsharpen` has no amount control, so this is done by hand.)
+pub fn unsharp_mask(mut img: RgbImage, s: &Sharpen) -> RgbImage {
+    if s.amount <= 0.0 || s.radius <= 0.0 {
+        return img;
     }
-    let mut dst = RgbImage::new(p.width, p.height);
-    Resizer::new()
-        .resize(flat, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)))
-        .expect("RGB8 source and destination are always compatible");
-    dst
+    let blurred = imageops::fast_blur(&img, s.radius);
+    let t = s.threshold as i32;
+    for (px, b) in img.iter_mut().zip(blurred.iter()) {
+        let diff = *px as i32 - *b as i32;
+        if diff.abs() > t {
+            *px = (*px as f32 + s.amount * diff as f32).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    img
 }
 
 pub fn encode(img: &RgbImage, quality: u8) -> Vec<u8> {
@@ -357,8 +431,42 @@ mod tests {
 
     #[test]
     fn resize_hits_requested_dimensions() {
-        let p = PrepParams { width: 100, height: 57 };
-        assert_eq!(prepare(&noisy(301, 207), &p).dimensions(), (100, 57));
+        for (filter, ..) in Filter::ALL {
+            let p = PrepParams { width: 100, height: 57, filter, sharpen: Sharpen::OFF };
+            assert_eq!(prepare(&noisy(301, 207), &p).dimensions(), (100, 57), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn filter_keys_round_trip() {
+        for (filter, key, _) in Filter::ALL {
+            assert_eq!(Filter::from_key(key), filter);
+            assert_eq!(filter.key(), key);
+        }
+        assert_eq!(Filter::from_key("unknown"), Filter::Bilinear);
+    }
+
+    #[test]
+    fn sharpen_off_is_identity_and_on_boosts_edges() {
+        // A soft vertical edge: 64 on the left, 192 on the right, blended in between.
+        let img = RgbImage::from_fn(40, 10, |x, _| {
+            let v = (64.0 + 128.0 * ((x as f32 - 17.0) / 6.0).clamp(0.0, 1.0)) as u8;
+            image::Rgb([v, v, v])
+        });
+        assert_eq!(unsharp_mask(img.clone(), &Sharpen::OFF), img);
+        let sharp = unsharp_mask(img.clone(), &Sharpen { amount: 1.5, radius: 2.0, threshold: 0 });
+        // Overshoot on both sides of the edge = higher local contrast.
+        let (dark, light) = (sharp.get_pixel(16, 5)[0], sharp.get_pixel(24, 5)[0]);
+        assert!(dark < 64 && light > 192, "dark {dark} light {light}");
+        // Far from the edge nothing changes.
+        assert_eq!(sharp.get_pixel(2, 5), img.get_pixel(2, 5));
+    }
+
+    #[test]
+    fn sharpen_threshold_leaves_small_differences() {
+        let img = noisy(64, 48);
+        let gentle = unsharp_mask(img.clone(), &Sharpen { amount: 1.0, radius: 1.0, threshold: 255 });
+        assert_eq!(gentle, img, "nothing exceeds a 255 threshold");
     }
 
     #[test]

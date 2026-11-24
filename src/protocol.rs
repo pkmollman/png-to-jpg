@@ -3,6 +3,7 @@
 //! Plain JS objects, so image bytes can be *transferred* between threads (moved,
 //! not copied) via `postMessage`'s transfer list.
 
+use crate::process::{Filter, Sharpen};
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use leptos::wasm_bindgen::{JsCast, JsValue};
 use web_sys::{DedicatedWorkerGlobalScope, Worker};
@@ -34,6 +35,8 @@ pub struct JobSpec {
     pub version: u32,
     pub width: u32,
     pub height: u32,
+    pub filter: Filter,
+    pub sharpen: Sharpen,
     pub auto: bool,
     pub target_bytes: u32,
     /// Exact quality in manual mode, the cap in auto mode.
@@ -83,6 +86,10 @@ impl ToWorker {
                 set(&o, "version", j.version);
                 set(&o, "width", j.width);
                 set(&o, "height", j.height);
+                set(&o, "filter", j.filter.key());
+                set(&o, "sharpenAmount", j.sharpen.amount);
+                set(&o, "sharpenRadius", j.sharpen.radius);
+                set(&o, "sharpenThreshold", j.sharpen.threshold);
                 set(&o, "auto", j.auto);
                 set(&o, "target", j.target_bytes);
                 set(&o, "quality", j.quality);
@@ -100,6 +107,12 @@ impl ToWorker {
                 version: num(v, "version") as u32,
                 width: num(v, "width") as u32,
                 height: num(v, "height") as u32,
+                filter: Filter::from_key(&get(v, "filter").as_string().unwrap_or_default()),
+                sharpen: Sharpen {
+                    amount: num(v, "sharpenAmount") as f32,
+                    radius: num(v, "sharpenRadius") as f32,
+                    threshold: num(v, "sharpenThreshold") as u8,
+                },
                 auto: flag(v, "auto"),
                 target_bytes: num(v, "target") as u32,
                 quality: num(v, "quality") as u16,

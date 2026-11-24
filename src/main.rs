@@ -4,6 +4,7 @@ use leptos::__reexports::wasm_bindgen_futures::JsFuture;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::wasm_bindgen::{JsCast, JsValue, closure::Closure};
+use resize_img::process::{Filter, Sharpen};
 use resize_img::protocol::{FromWorker, JobSpec, ToWorker};
 
 /// The worker's JS glue and wasm, emitted by Trunk next to the page. Relative,
@@ -42,6 +43,8 @@ struct Job {
     version: u32,
     width: u32,
     height: u32,
+    filter: Filter,
+    sharpen: Sharpen,
     auto: bool,
     target_bytes: u32,
     /// Exact quality in manual mode, the cap in auto mode.
@@ -132,6 +135,11 @@ fn App() -> impl IntoView {
     let quality = RwSignal::new(100u16);
     // Auto mode's ceiling. 100 = no ceiling: an image that fits comes out at full quality.
     let max_quality = RwSignal::new(100u16);
+    let filter = RwSignal::new(Filter::default());
+    // Sharpening starts off (amount 0); radius/threshold are sensible starting points.
+    let sharpen_amount = RwSignal::new(Sharpen::OFF.amount);
+    let sharpen_radius = RwSignal::new(Sharpen::OFF.radius);
+    let sharpen_threshold = RwSignal::new(Sharpen::OFF.threshold);
 
     let split = RwSignal::new(50.0f64);
     // Screen pixels per original pixel; 0 = fit the window.
@@ -283,6 +291,12 @@ fn App() -> impl IntoView {
             version: version.get(),
             width: width.get().clamp(1, 16384),
             height: height.get().clamp(1, 16384),
+            filter: filter.get(),
+            sharpen: Sharpen {
+                amount: sharpen_amount.get(),
+                radius: sharpen_radius.get(),
+                threshold: sharpen_threshold.get(),
+            },
             auto: auto.get(),
             target_bytes: (target_kb.get() * 1000.0).clamp(1.0, u32::MAX as f64) as u32,
             // Auto: the cap. Manual: the exact quality (auto writes its answer into
@@ -310,6 +324,8 @@ fn App() -> impl IntoView {
                     version: job.version,
                     width: job.width,
                     height: job.height,
+                    filter: job.filter,
+                    sharpen: job.sharpen,
                     auto: job.auto,
                     target_bytes: job.target_bytes,
                     quality: job.quality,
@@ -766,6 +782,37 @@ fn App() -> impl IntoView {
                                     }
                                 }).collect_view()}
                             </div>
+                            <label class="field">"Resampling"
+                                <select
+                                    prop:value=move || filter.get().key()
+                                    on:change=move |ev| filter.set(Filter::from_key(&event_target_value(&ev)))
+                                >
+                                    {Filter::ALL.iter().map(|(_, key, label)| view! {
+                                        <option value=*key>{*label}</option>
+                                    }).collect_view()}
+                                </select>
+                            </label>
+                        </section>
+
+                        <section>
+                            <h2>"Sharpening"</h2>
+                            <Slider label="Amount" min=0.0 max=3.0 step=0.1
+                                value=Signal::derive(move || sharpen_amount.get() as f64)
+                                on_input=move |v| sharpen_amount.set(v as f32)
+                                hint="0 = off. Restores crispness lost when downscaling; costs file size."
+                            />
+                            <Slider label="Radius" min=0.3 max=3.0 step=0.1
+                                value=Signal::derive(move || sharpen_radius.get() as f64)
+                                on_input=move |v| sharpen_radius.set(v as f32)
+                                disabled=Signal::derive(move || sharpen_amount.get() == 0.0)
+                                hint="Small = fine detail, large = broader edges."
+                            />
+                            <Slider label="Threshold" min=0.0 max=30.0 step=1.0
+                                value=Signal::derive(move || sharpen_threshold.get() as f64)
+                                on_input=move |v| sharpen_threshold.set(v as u8)
+                                disabled=Signal::derive(move || sharpen_amount.get() == 0.0)
+                                hint="Skips subtle differences so flat areas and noise aren't amplified."
+                            />
                         </section>
 
                         <section>

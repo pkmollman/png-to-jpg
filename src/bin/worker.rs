@@ -61,7 +61,12 @@ fn encode_job(st: &mut State, job: JobSpec) -> FromWorker {
     if *version != job.version {
         return FromWorker::Skipped { id: job.id };
     }
-    let prep = PrepParams { width: job.width.clamp(1, 16384), height: job.height.clamp(1, 16384) };
+    let prep = PrepParams {
+        width: job.width.clamp(1, 16384),
+        height: job.height.clamp(1, 16384),
+        filter: job.filter,
+        sharpen: job.sharpen,
+    };
     let key = (job.version, prep);
 
     let mut prep_ms = None;
